@@ -34,53 +34,66 @@ object App {
   def replaceUsingMap(country:Any, givenMap: Map[String,Int]): String = country match {
     case str: String => try {
       str.split(", ").map(givenMap(_)).mkString(", ")
+      //TODO tu wyjatek unkown country, czy da sie to zrobic optymalniej? i ogolnie o apply
+      //TODO trima dac
     } catch {
       case _: NoSuchElementException => "UNKNOWN COUNTRY"
       case _: Exception =>
         println("Unexpected Exception, fillin in \"EXERROR\"")
         "EXERROR"
     }
-    case _ if country == null => "59" //givenMap("France")
+    case _ if country == null => "59" //TODO givenMap("France").toString is better
+    //TODO magic number
     case _ =>
       println("Unexpected type, filling in \"TYPEERROR\"")
       "TYPEERROR"
+      //TODO zastanowic sie czy istnieje szansa, zeby to nie byl string ALBO country:Any -> country:String
+    //TODO wyjatek gdy nie string moze, trzeba zmniejszyc odpowiedzialnosc funkcji
   }
 
   def importMovieData(spark:SparkSession): DataFrame = {
-    spark.read.option("header", value = true).schema(movieSchema).option("quote", "\"").option("escape", "\"").option("mode", "PERMISSIVE").csv("hdfs:/user/mapr/data/IMDb movies.csv").cache()
+    spark.read.option("header", value = true).schema(movieSchema).option("quote", "\"").option("escape", "\"").option("mode", "PERMISSIVE")
+      .csv("hdfs:/user/mapr/data/IMDb movies.csv").cache()
   }
 
   def cleanData(df:DataFrame, spark:SparkSession): DataFrame = {
     import spark.implicits._
     val malformedRows = df.filter($"_corrupt_record".isNotNull)
+    //TODO sprawdzic DAG
     malformedRows.cache()
     val numMalformedRows = malformedRows.count()
     if (numMalformedRows > 0) {
       println(s"found $numMalformedRows malformed record(s). Skipping them")
     }
     malformedRows.unpersist()
+    //TODO cache i unpersist sprawdzic
     df.select("*").where($"_corrupt_record".isNull).drop($"_corrupt_record")
   }
 
   def extractIndexedCountryList(df:DataFrame,colName:String): List[(String,Int)] =
   {
     df.select(colName).as(Encoders.STRING).filter(_.nonEmpty).collect()
+      //TODO zrobic to w sposob rozproszony, df zamiast list
       .flatMap(_.split(",")).map(_.trim).filter(_.nonEmpty).distinct.sorted.zipWithIndex.toList
+    //TODO distinct na liscie a na df
   }
 
   def createCountryIdDataFrameFromList(list: List[(String,Int)],spark: SparkSession): DataFrame = {
     import spark.implicits._
+    //TODO parallelize, zmienic na df
     list.map( a => (a._2.toString,a._1)).toDF("_id", "country")
   }
 
   def enrichCountryToId(df:DataFrame, list: List[(String,Int)], spark: SparkSession): Dataset[Movie] = {
     import spark.implicits._
     val otherUdf = udf((a: Any) => replaceUsingMap(a,list.toMap))
+    //TODO co jezeli lista jest bardzo duza i sie nie miesci w pamieci na 1 maszynie - zastanowic sie
     try {
       val updatedDataframe = df.withColumn("country_id", otherUdf(df("country"))).drop("country")
       updatedDataframe.as[Movie]
     } catch {
       case e:AnalysisException =>
+        //TODO usunac
         println("An analysis exception has occurred  \n" + e.message)
         println("returning blank movie ds")
         Seq(Movie("title_id","title","original_Title",None,"date","genre",None,None,None,None,None,None,None,None,0.0,1,None,None,None,None,None,None)).toDS()
@@ -90,6 +103,7 @@ object App {
 
   def main(args: Array[String]): Unit = {
     implicit val spark: SparkSession = SparkSession.builder.appName("joob").master("local[*]").getOrCreate()
+//TODO tu mastera sprawdzic czy sie, sprawdzic w yarnie czy to sie odpala i sprawdzic to i lokalnie, i u klienta
 
     val data = importMovieData(spark)
     println("imported data")
@@ -105,7 +119,8 @@ object App {
     println("enriched dataframe to dataset")
     enrichedMoviesDS.saveToMapRDB("/tables/movie", idFieldPath = "imdb_title_id")
     println("saved")
-
+//TODO zobaczyc jak te dane sa partycjonowane po drodze
+    //TODO ogolna uwagi: robic to na df lub ds bez transformowania niepotrzebnego, usunac collect/pozbyc sie
     spark.stop()
   }
   // Query 1: find /tables/movie --q {"$where":{"$like":{"_id":"b%"}}}
