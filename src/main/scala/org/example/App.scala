@@ -62,6 +62,7 @@ object App {
     val cleanData = App.cleanData(rawData,spark)
     println("cleaned data")
     spark.stop()
+
   }
 
   // Query 1: find /tables/movie --q {"$where":{"$like":{"_id":"b%"}}}
