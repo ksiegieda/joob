@@ -1,7 +1,10 @@
 package org.example
 
 import org.apache.spark.sql._
+import org.apache.spark.sql.functions.{explode, udf}
 import org.apache.spark.sql.types._
+
+import java.util.UUID
 
 object App {
   val movieSchema: StructType = StructType(Array(
@@ -54,15 +57,49 @@ object App {
     ds.select("*").where($"_corrupt_record".isNull).drop($"_corrupt_record").as[Movie]
   }
 
+  def explodeContries(ds:Dataset[Movie], spark:SparkSession): Dataset[Movie] = {
+    import spark.implicits._
+    val sds = ds.withColumn("country", functions.split($"country",", "))
+      .withColumn("country",explode($"country"))
+    sds.as[Movie]
+  }
+
+  def distinctCountries(ds:Dataset[Movie], spark:SparkSession): DataFrame = {
+    ds.select("country").distinct()
+  }
+
+  def createCountryIDs(df:DataFrame, spark:SparkSession): DataFrame = {
+    import spark.implicits._
+    val generateUUID = udf((a:String) => UUID.nameUUIDFromBytes(a.getBytes).toString)
+    val sdf = df.select("country").withColumn("_id",generateUUID($"country"))
+    sdf
+  }
+
+  def joinData(imdb: Dataset[Movie], dict: Dataset[IDMovie], spark:SparkSession): Dataset[Movie] = {
+    import spark.implicits._
+    val result = imdb.join(dict,Seq("country"),"fullouter").drop("country")
+    result.as[Movie]
+  }
+
   def main(args: Array[String]): Unit = {
     implicit val spark: SparkSession = SparkSession.builder.appName("joob").master("local[*]").getOrCreate()
+    import spark.implicits._
 
     val rawData = importMovies(spark)
     println("imported data")
     val cleanData = App.cleanData(rawData,spark)
     println("cleaned data")
-    spark.stop()
+    val explodedCountries = explodeContries(cleanData,spark)
+    val countriesDF = distinctCountries(explodedCountries, spark)
+    val countriesIDDF = createCountryIDs(countriesDF, spark)
+//    countriesIDDF.saveToMapRDB("/tables/country")
+    val countriesIDDS: Dataset[IDMovie] = countriesIDDF.as[IDMovie]
+    val joined = joinData(explodedCountries, countriesIDDS, spark)
+    joined.show()
+//    joined.saveToMapRDB("/tables/movie")
 
+    spark.stop()
+    //TODO check the Movie class cause I am not sure that joining is 100% okay
   }
 
   // Query 1: find /tables/movie --q {"$where":{"$like":{"_id":"b%"}}}
