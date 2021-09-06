@@ -1,7 +1,7 @@
 package org.example
 
 import org.apache.spark.sql._
-import org.apache.spark.sql.functions.{explode, udf}
+import org.apache.spark.sql.functions.{collect_set, concat_ws, explode, first, udf}
 import org.apache.spark.sql.types._
 
 import java.util.UUID
@@ -81,6 +81,14 @@ object App {
     result.as[Movie]
   }
 
+  def collectCountries(ds:Dataset[Movie],spark: SparkSession): Dataset[Movie] = {
+    import spark.implicits._
+    val columnMap: Array[Column] = ds.columns.filterNot(a => a == "_id")
+      .map(a => first(a).as(a)):+ concat_ws(", ",collect_set("_id"))
+      .as("country_id")
+    ds.groupBy($"imdb_title_id".as("_id")).agg(columnMap.head, columnMap.tail: _*).as[Movie]
+  }
+
   def main(args: Array[String]): Unit = {
     implicit val spark: SparkSession = SparkSession.builder.appName("joob").master("local[*]").getOrCreate()
     import spark.implicits._
@@ -95,11 +103,12 @@ object App {
 //    countriesIDDF.saveToMapRDB("/tables/country")
     val countriesIDDS: Dataset[IDMovie] = countriesIDDF.as[IDMovie]
     val joined = joinData(explodedCountries, countriesIDDS, spark)
-    joined.show()
-//    joined.saveToMapRDB("/tables/movie")
+    val collected = collectCountries(joined, spark)
+//    collected.saveToMapRDB("/tables/movie")
+
 
     spark.stop()
-    //TODO check the Movie class cause I am not sure that joining is 100% okay
+
   }
 
   // Query 1: find /tables/movie --q {"$where":{"$like":{"_id":"b%"}}}
