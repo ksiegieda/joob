@@ -1,5 +1,6 @@
 package org.example
 
+import com.mapr.db.spark.sql.toMapRDBDataFrame
 import org.apache.spark.sql._
 import org.apache.spark.sql.functions.{collect_set, concat_ws, explode, first, udf}
 import org.apache.spark.sql.types._
@@ -40,8 +41,8 @@ object App {
       .option("quote", "\"")
       .option("escape", "\"")
       .option("mode", "PERMISSIVE")
-//      .csv("hdfs:/user/mapr/data/IMDb movies.csv")
-      .csv("file:///C:/SII/LAT/joob/data/IMDb-movies.csv")
+      .csv("hdfs:/user/mapr/data/IMDb movies.csv")
+//      .csv("file:///C:/SII/LAT/joob/data/IMDb-movies.csv")
       .as[Movie]
   }
 
@@ -100,11 +101,11 @@ object App {
     val explodedCountries = explodeContries(cleanData,spark)
     val countriesDF = distinctCountries(explodedCountries, spark)
     val countriesIDDF = createCountryIDs(countriesDF, spark)
-//    countriesIDDF.saveToMapRDB("/tables/country")
+    countriesIDDF.saveToMapRDB("/tables/country")
     val countriesIDDS: Dataset[IDMovie] = countriesIDDF.as[IDMovie]
     val joined = joinData(explodedCountries, countriesIDDS, spark)
     val collected = collectCountries(joined, spark)
-//    collected.saveToMapRDB("/tables/movie")
+    collected.saveToMapRDB("/tables/movie")
 
 
     spark.stop()
