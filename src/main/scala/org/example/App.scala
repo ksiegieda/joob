@@ -1,9 +1,11 @@
 package org.example
 
 import com.mapr.db.spark.sql.toMapRDBDataFrame
-import org.apache.spark.sql.functions.udf
-import org.apache.spark.sql.types._
 import org.apache.spark.sql._
+import org.apache.spark.sql.functions.{collect_set, concat_ws, explode, first, udf}
+import org.apache.spark.sql.types._
+
+import java.util.UUID
 
 object App {
   val movieSchema: StructType = StructType(Array(
@@ -31,98 +33,85 @@ object App {
     StructField("reviews_from_critics", DoubleType, nullable = true)
   )).add("_corrupt_record", StringType, nullable = true)
 
-  def replaceUsingMap(country:Any, givenMap: Map[String,Int]): String = country match {
-    case str: String => try {
-      str.split(", ").map(givenMap(_)).mkString(", ")
-      //TODO tu wyjatek unkown country, czy da sie to zrobic optymalniej? i ogolnie o apply
-      //TODO trima dac
-    } catch {
-      case _: NoSuchElementException => "UNKNOWN COUNTRY"
-      case _: Exception =>
-        println("Unexpected Exception, fillin in \"EXERROR\"")
-        "EXERROR"
-    }
-    case _ if country == null => "59" //TODO givenMap("France").toString is better
-    //TODO magic number
-    case _ =>
-      println("Unexpected type, filling in \"TYPEERROR\"")
-      "TYPEERROR"
-      //TODO zastanowic sie czy istnieje szansa, zeby to nie byl string ALBO country:Any -> country:String
-    //TODO wyjatek gdy nie string moze, trzeba zmniejszyc odpowiedzialnosc funkcji
-  }
-
-  def importMovieData(spark:SparkSession): DataFrame = {
-    spark.read.option("header", value = true).schema(movieSchema).option("quote", "\"").option("escape", "\"").option("mode", "PERMISSIVE")
-      .csv("hdfs:/user/mapr/data/IMDb movies.csv").cache()
-  }
-
-  def cleanData(df:DataFrame, spark:SparkSession): DataFrame = {
+  def importMovies(spark:SparkSession): Dataset[Movie] = {
     import spark.implicits._
-    val malformedRows = df.filter($"_corrupt_record".isNotNull)
-    //TODO sprawdzic DAG
+    spark.read
+      .option("header", value = true)
+      .schema(movieSchema)
+      .option("quote", "\"")
+      .option("escape", "\"")
+      .option("mode", "PERMISSIVE")
+      .csv("hdfs:/user/mapr/data/IMDb movies.csv")
+//      .csv("file:///C:/SII/LAT/joob/data/IMDb-movies.csv")
+      .as[Movie]
+  }
+
+  def cleanData(ds:Dataset[Movie], spark:SparkSession): Dataset[Movie] = {
+    import spark.implicits._
+    val malformedRows = ds.filter($"_corrupt_record".isNotNull)
     malformedRows.cache()
     val numMalformedRows = malformedRows.count()
     if (numMalformedRows > 0) {
       println(s"found $numMalformedRows malformed record(s). Skipping them")
     }
     malformedRows.unpersist()
-    //TODO cache i unpersist sprawdzic
-    df.select("*").where($"_corrupt_record".isNull).drop($"_corrupt_record")
+    ds.select("*").where($"_corrupt_record".isNull).drop($"_corrupt_record").as[Movie]
   }
 
-  def extractIndexedCountryList(df:DataFrame,colName:String): List[(String,Int)] =
-  {
-    df.select(colName).as(Encoders.STRING).filter(_.nonEmpty).collect()
-      //TODO zrobic to w sposob rozproszony, df zamiast list
-      .flatMap(_.split(",")).map(_.trim).filter(_.nonEmpty).distinct.sorted.zipWithIndex.toList
-    //TODO distinct na liscie a na df
-  }
-
-  def createCountryIdDataFrameFromList(list: List[(String,Int)],spark: SparkSession): DataFrame = {
+  def explodeContries(ds:Dataset[Movie], spark:SparkSession): Dataset[Movie] = {
     import spark.implicits._
-    //TODO parallelize, zmienic na df
-    list.map( a => (a._2.toString,a._1)).toDF("_id", "country")
+    val sds = ds.withColumn("country", functions.split($"country",", "))
+      .withColumn("country",explode($"country"))
+    sds.as[Movie]
   }
 
-  def enrichCountryToId(df:DataFrame, list: List[(String,Int)], spark: SparkSession): Dataset[Movie] = {
-    import spark.implicits._
-    val otherUdf = udf((a: Any) => replaceUsingMap(a,list.toMap))
-    //TODO co jezeli lista jest bardzo duza i sie nie miesci w pamieci na 1 maszynie - zastanowic sie
-    try {
-      val updatedDataframe = df.withColumn("country_id", otherUdf(df("country"))).drop("country")
-      updatedDataframe.as[Movie]
-    } catch {
-      case e:AnalysisException =>
-        //TODO usunac
-        println("An analysis exception has occurred  \n" + e.message)
-        println("returning blank movie ds")
-        Seq(Movie("title_id","title","original_Title",None,"date","genre",None,None,None,None,None,None,None,None,0.0,1,None,None,None,None,None,None)).toDS()
-    }
+  def distinctCountries(ds:Dataset[Movie], spark:SparkSession): DataFrame = {
+    ds.select("country").distinct()
+  }
 
+  def createCountryIDs(df:DataFrame, spark:SparkSession): DataFrame = {
+    import spark.implicits._
+    val generateUUID = udf((a:String) => UUID.nameUUIDFromBytes(a.getBytes).toString)
+    val sdf = df.select("country").withColumn("_id",generateUUID($"country"))
+    sdf
+  }
+
+  def joinData(imdb: Dataset[Movie], dict: Dataset[IDMovie], spark:SparkSession): Dataset[Movie] = {
+    import spark.implicits._
+    val result = imdb.join(dict,Seq("country"),"fullouter").drop("country")
+    result.as[Movie]
+  }
+
+  def collectCountries(ds:Dataset[Movie],spark: SparkSession): Dataset[Movie] = {
+    import spark.implicits._
+    val columnMap: Array[Column] = ds.columns.filterNot(a => a == "_id")
+      .map(a => first(a).as(a)):+ concat_ws(", ",collect_set("_id"))
+      .as("country_id")
+    ds.groupBy($"imdb_title_id".as("_id")).agg(columnMap.head, columnMap.tail: _*).as[Movie]
   }
 
   def main(args: Array[String]): Unit = {
     implicit val spark: SparkSession = SparkSession.builder.appName("joob").master("local[*]").getOrCreate()
-//TODO tu mastera sprawdzic czy sie, sprawdzic w yarnie czy to sie odpala i sprawdzic to i lokalnie, i u klienta
+    import spark.implicits._
 
-    val data = importMovieData(spark)
+    val rawData = importMovies(spark)
     println("imported data")
-    val cleanData = App.cleanData(data,spark)
+    val cleanData = App.cleanData(rawData,spark)
     println("cleaned data")
-    val countryList = extractIndexedCountryList(cleanData,"country")
-    println("extracted list")
-    val countryDF = createCountryIdDataFrameFromList(countryList,spark)
-    println("created country df")
-    countryDF.saveToMapRDB("/tables/country")
-    println("saved countries to maprdb")
-    val enrichedMoviesDS = enrichCountryToId(cleanData,countryList,spark)
-    println("enriched dataframe to dataset")
-    enrichedMoviesDS.saveToMapRDB("/tables/movie", idFieldPath = "imdb_title_id")
-    println("saved")
-//TODO zobaczyc jak te dane sa partycjonowane po drodze
-    //TODO ogolna uwagi: robic to na df lub ds bez transformowania niepotrzebnego, usunac collect/pozbyc sie
+    val explodedCountries = explodeContries(cleanData,spark)
+    val countriesDF = distinctCountries(explodedCountries, spark)
+    val countriesIDDF = createCountryIDs(countriesDF, spark)
+    countriesIDDF.saveToMapRDB("/tables/country")
+    val countriesIDDS: Dataset[IDMovie] = countriesIDDF.as[IDMovie]
+    val joined = joinData(explodedCountries, countriesIDDS, spark)
+    val collected = collectCountries(joined, spark)
+    collected.saveToMapRDB("/tables/movie")
+
+
     spark.stop()
+
   }
+
   // Query 1: find /tables/movie --q {"$where":{"$like":{"_id":"b%"}}}
   // Query 2: find /tables/movie --q {"$where":{"$and":[{"$eq":{"year":2010}},{"$like":{"title":"C%"}}]}}
 }

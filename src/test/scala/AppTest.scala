@@ -1,8 +1,5 @@
 import org.apache.spark.SparkContext
-import org.apache.spark.sql.types._
-import org.apache.spark.sql.{DataFrame, SparkSession}
-import org.example.App._
-import org.example.Movie
+import org.apache.spark.sql.SparkSession
 import org.scalatest.FlatSpec
 
 import scala.language.postfixOps
@@ -14,11 +11,10 @@ class AppTest extends FlatSpec{
     .master("local[*]")
     .config("spark.ui.enabled", "false")
     .getOrCreate()
-  import spark.implicits._
 
   val sc: SparkContext = spark.sparkContext
   sc.setLogLevel("ERROR")
-
+/*
   val movieWithIdSchema: StructType = StructType(Array(
     StructField("imdb_title_id", StringType, nullable = true),
     StructField("title", StringType, nullable = true),
@@ -212,4 +208,5 @@ class AppTest extends FlatSpec{
 
 
   }
+ */
 }
